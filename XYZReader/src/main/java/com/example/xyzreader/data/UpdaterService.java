@@ -12,13 +12,17 @@ import android.os.RemoteException;
 import android.text.format.Time;
 import android.util.Log;
 
-import com.example.xyzreader.remote.RemoteEndpointUtil;
-
-import org.json.JSONArray;
-import org.json.JSONException;
-import org.json.JSONObject;
+import com.example.xyzreader.api.ArticlesApi;
+import com.example.xyzreader.model.Article;
 
 import java.util.ArrayList;
+import java.util.List;
+
+import retrofit2.Call;
+import retrofit2.Callback;
+import retrofit2.GsonConverterFactory;
+import retrofit2.Response;
+import retrofit2.Retrofit;
 
 public class UpdaterService extends IntentService {
     private static final String TAG = "UpdaterService";
@@ -34,7 +38,7 @@ public class UpdaterService extends IntentService {
 
     @Override
     protected void onHandleIntent(Intent intent) {
-        Time time = new Time();
+        final Time time = new Time();
 
         ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
         NetworkInfo ni = cm.getActiveNetworkInfo();
@@ -46,42 +50,52 @@ public class UpdaterService extends IntentService {
         sendStickyBroadcast(
                 new Intent(BROADCAST_ACTION_STATE_CHANGE).putExtra(EXTRA_REFRESHING, true));
 
-        // Don't even inspect the intent, we only do one thing, and that's fetch content.
-        ArrayList<ContentProviderOperation> cpo = new ArrayList<ContentProviderOperation>();
+        ArticlesApi articlesApi = new Retrofit.Builder()
+                .baseUrl(ArticlesApi.BASE_ENDPOINT)
+                .addConverterFactory(GsonConverterFactory.create())
+                .build().create(ArticlesApi.class);
 
-        Uri dirUri = ItemsContract.Items.buildDirUri();
+        Call<List<Article>> call = articlesApi.getArticles();
+        call.enqueue(new Callback<List<Article>>() {
+            @Override
+            public void onResponse(Response<List<Article>> response) {
+                ArrayList<ContentProviderOperation> cpo = new ArrayList<ContentProviderOperation>();
+                Uri dirUri = ItemsContract.Items.buildDirUri();
+                List<Article> articles = response.body();
 
-        // Delete all items
-        cpo.add(ContentProviderOperation.newDelete(dirUri).build());
+                // Delete all items
+                cpo.add(ContentProviderOperation.newDelete(dirUri).build());
 
-        try {
-            JSONArray array = RemoteEndpointUtil.fetchJsonArray();
-            if (array == null) {
-                throw new JSONException("Invalid parsed item array" );
+                for (Article article : articles) {
+                    ContentValues values = new ContentValues();
+                    values.put(ItemsContract.Items.SERVER_ID, article.getId());
+                    values.put(ItemsContract.Items.AUTHOR, article.getAuthor());
+                    values.put(ItemsContract.Items.TITLE, article.getTitle());
+                    values.put(ItemsContract.Items.BODY, article.getBody());
+                    values.put(ItemsContract.Items.THUMB_URL, article.getThumb());
+                    values.put(ItemsContract.Items.PHOTO_URL, article.getPhoto());
+                    values.put(ItemsContract.Items.ASPECT_RATIO, article.getAspectRatio());
+                    time.parse3339(article.getPublishedDate());
+                    values.put(ItemsContract.Items.PUBLISHED_DATE, time.toMillis(false));
+                    cpo.add(ContentProviderOperation.newInsert(dirUri).withValues(values).build());
+
+                }
+                try {
+                    getContentResolver().applyBatch(ItemsContract.CONTENT_AUTHORITY, cpo);
+                } catch (RemoteException | OperationApplicationException e) {
+                    Log.e(TAG, "Error updating content.", e);
+                }
+                sendStickyBroadcast(
+                        new Intent(BROADCAST_ACTION_STATE_CHANGE).putExtra(EXTRA_REFRESHING, false));
             }
 
-            for (int i = 0; i < array.length(); i++) {
-                ContentValues values = new ContentValues();
-                JSONObject object = array.getJSONObject(i);
-                values.put(ItemsContract.Items.SERVER_ID, object.getString("id" ));
-                values.put(ItemsContract.Items.AUTHOR, object.getString("author" ));
-                values.put(ItemsContract.Items.TITLE, object.getString("title" ));
-                values.put(ItemsContract.Items.BODY, object.getString("body" ));
-                values.put(ItemsContract.Items.THUMB_URL, object.getString("thumb" ));
-                values.put(ItemsContract.Items.PHOTO_URL, object.getString("photo" ));
-                values.put(ItemsContract.Items.ASPECT_RATIO, object.getString("aspect_ratio" ));
-                time.parse3339(object.getString("published_date"));
-                values.put(ItemsContract.Items.PUBLISHED_DATE, time.toMillis(false));
-                cpo.add(ContentProviderOperation.newInsert(dirUri).withValues(values).build());
+            @Override
+            public void onFailure(Throwable t) {
+                Log.e(TAG, "Error fetching content.");
+                sendStickyBroadcast(
+                        new Intent(BROADCAST_ACTION_STATE_CHANGE).putExtra(EXTRA_REFRESHING, false));
+
             }
-
-            getContentResolver().applyBatch(ItemsContract.CONTENT_AUTHORITY, cpo);
-
-        } catch (JSONException | RemoteException | OperationApplicationException e) {
-            Log.e(TAG, "Error updating content.", e);
-        }
-
-        sendStickyBroadcast(
-                new Intent(BROADCAST_ACTION_STATE_CHANGE).putExtra(EXTRA_REFRESHING, false));
+        });
     }
 }
